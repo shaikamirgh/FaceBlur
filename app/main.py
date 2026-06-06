@@ -99,6 +99,14 @@ def main():
                 (int(width * args.display_scale), int(height * args.display_scale))
             )
 
+        try:
+            elapsed = time.time() -t0
+            fps_display = processed_frames / max(1e-6, elapsed)
+            cv2.putText(display, f'FPS: {fps_display:.2f}', (10,30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
+        except Exception:
+            pass
+
         cv2.imshow('FaceBlur - Video', display)
 
         if writer is not None:
