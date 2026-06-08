@@ -162,10 +162,9 @@ def main():
                 last_output = engine.process_frame(frame, debug=args.debug)
                 processed_frames += 1
             else:
+            else:
                 # Reuse last processed frame
-                if last_output is not None:
-                    last_output = last_output
-                else:
+                if last_output is None:
                     last_output = frame
 
             display = last_output
@@ -197,9 +196,15 @@ def main():
                 break
     finally:
         reader.stop_flag = True
-        if writer:
-            writer.stop_flag = True
-        
+        reader.join(timeout=5)
+
+        if writer is not None:
+            try:
+                output_queue.put(None, timeout=1.0)
+            except queue.Full:
+                writer.stop_flag = True
+            writer.join(timeout=10)
+
         cv2.destroyAllWindows()
 
         elapsed = time.time() - t0

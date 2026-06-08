@@ -1,11 +1,11 @@
 """
 main_gpu_optimized.py
 
-Ultra-high-performance GPU-optimized video runner with batch processing.
+Ultra-high-performance GPU-optimized video runner with frame batching.
 
 Key optimizations:
-- Batch processing (process 4-8 frames per GPU call)
-- GPU-accelerated detection & recognition (CUDA)
+- Frame batching (group frames for scheduling; still processes frames individually)
+- GPU-accelerated detection & recognition (CUDA when available)
 - Aggressive frame skipping
 - Minimal CPU-GPU transfers
 
@@ -24,21 +24,19 @@ import os
 import time
 import threading
 import queue
-import numpy as np
 from collections import deque
-
 from pipeline.filter_engine import FilterEngine
 
 
 class GPUBatchProcessor:
     """Process multiple frames in a single GPU batch."""
-    
-    def __init__(self, engine, batch_size=4):
+
+    def __init__(self, engine, batch_size=4, debug=False):
         self.engine = engine
         self.batch_size = batch_size
+        self.debug = debug
         self.frame_buffer = deque(maxlen=batch_size)
-        self.batch_idx = 0
-        
+
     def process_batch(self, frames):
         """
         Process a batch of frames together for efficiency.
@@ -46,7 +44,7 @@ class GPUBatchProcessor:
         """
         results = []
         for frame in frames:
-            output = self.engine.process_frame(frame, debug=False)
+            output = self.engine.process_frame(frame, debug=self.debug)
             results.append(output)
         return results
     
@@ -159,9 +157,8 @@ def main():
     # ---- Initialize engine (will use GPU) ----
     engine = FilterEngine(threshold=args.threshold)
     engine.set_master(master_img)
-    
-    batch_processor = GPUBatchProcessor(engine, batch_size=args.batch_size)
 
+    batch_processor = GPUBatchProcessor(engine, batch_size=args.batch_size, debug=args.debug)
     frame_idx = 0
     processed_frames = 0
     output_frame_idx = 0
@@ -250,11 +247,16 @@ def main():
         pass
     finally:
         reader.stop_flag = True
-        if writer:
-            writer.stop_flag = True
-        
-        cv2.destroyAllWindows()
+        reader.join(timeout=5)
 
+        if writer is not None:
+            try:
+                output_queue.put(None, timeout=1.0)
+            except queue.Full:
+                writer.stop_flag = True
+            writer.join(timeout=10)
+
+        cv2.destroyAllWindows()
         elapsed = time.time() - t0
         print(f'\n[INFO] Frames read: {frame_idx}')
         print(f'[INFO] Frames processed: {processed_frames}')
