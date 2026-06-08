@@ -28,7 +28,8 @@ class FaceDetector:
     """
     def __init__(self, det_size=(640, 640), providers=None):
         if providers is None:
-            providers = ['CPUExecutionProvider']
+            # GPU-first strategy: try CUDA, fall back to CPU
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
 
         # buffalo_l includes RetinaFace + ArcFace models
         self.app = FaceAnalysis(name='buffalo_l', providers=providers)

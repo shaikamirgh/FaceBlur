@@ -29,8 +29,9 @@ class FilterEngine:
     def __init__(self,
                  threshold=0.45,
                  blur_strength=99,
-                 detect_scale=0.45,
-                 recognize_interval=10):
+                 detect_scale=0.30,
+                 recognize_interval=30,
+                 detection_interval=3):
         self.detector = FaceDetector()
         self.recognizer = FaceRecognizer()
         self.tracker = CentroidTracker()
@@ -39,8 +40,9 @@ class FilterEngine:
         self.blur_strength = blur_strength
         self.detect_scale = detect_scale
         self.recognize_interval = recognize_interval
+        self.detection_interval = detection_interval
         self.blur_mode = 'gaussian' # or 'black'
-
+        self.min_face_width = 20
 
         self.master_embedding = None
         self.frame_idx = 0
@@ -65,7 +67,7 @@ class FilterEngine:
         print('[INFO] Master face registered')
 
     # --------------------------------------------------
-    # Frame processing (TRACKING + CACHING + INTERVAL)
+    # Frame processing (TRACKING + CACHING + INTERVAL + DETECTION CACHE)
     # --------------------------------------------------
     def process_frame(self, frame_bgr, debug=False):
         if self.master_embedding is None:
@@ -75,26 +77,34 @@ class FilterEngine:
         h, w = frame_bgr.shape[:2]
         scale = self.detect_scale
 
-        # --- Downscale frame for ML ---
-        small = cv2.resize(frame_bgr, (int(w * scale), int(h * scale)))
-
-        detections = self.detector.detect(small)
-
-        # --- Rescale detections back ---
-        for det in detections:
-            x1, y1, x2, y2 = det['bbox']
-            det['bbox'] = (
-                int(x1 / scale), int(y1 / scale),
-                int(x2 / scale), int(y2 / scale)
-            )
-            if det['kps'] is not None:
-                det['kps'] = (det['kps'] / scale).astype(int)
+        # --- Detection Caching: Run detection on first frame, then every Nth frame ---
+        if self.frame_idx == 1 or self.frame_idx % self.detection_interval == 0:
+            small = cv2.resize(frame_bgr, (int(w * scale), int(h * scale)))
+            detections = self.detector.detect(small)
+            
+            # --- Rescale detections back ---
+            for det in detections:
+                x1, y1, x2, y2 = det['bbox']
+                det['bbox'] = (
+                    int(x1 / scale), int(y1 / scale),
+                    int(x2 / scale), int(y2 / scale)
+                )
+                if det['kps'] is not None:
+                    det['kps'] = (det['kps'] / scale).astype(int)
+            
+        else:
+            detections = []
 
         tracks = self.tracker.update(detections)
         output = frame_bgr.copy()
 
         for track in tracks:
             x1, y1, x2, y2 = track.bbox
+            
+            # Skip tiny faces (< 20px)
+            face_width = x2 - x1
+            if face_width < self.min_face_width:
+                continue
 
             # Decide if recognition should run
             need_recognition = (

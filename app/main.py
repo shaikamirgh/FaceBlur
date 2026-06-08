@@ -1,13 +1,15 @@
 """
 main.py
 
-High-performance video runner for FaceBlur (OPTIMIZED).
+High-performance video runner for FaceBlur (OPTIMIZED with multi-threading).
 
-Optimizations added:
+Optimizations:
 - Frame skipping (process every Nth frame)
 - FPS-aware display
-- Optional resize for display only
-- Clean separation of I/O vs ML
+- Multi-threaded I/O (background reader/writer)
+- Aggressive downscaling (30% detection scale)
+- Detection caching (every 3rd frame)
+- Skip tiny faces (< 20px)
 
 Run:
 python -m app.main \
@@ -21,8 +23,73 @@ import argparse
 import cv2
 import os
 import time
+import threading
+import queue
+from collections import deque
 
 from pipeline.filter_engine import FilterEngine
+
+
+class FrameReader(threading.Thread):
+    """Background thread that reads frames from video."""
+    def __init__(self, video_path, output_queue, max_queue_size=30):
+        super().__init__(daemon=True)
+        self.video_path = video_path
+        self.output_queue = output_queue
+        self.max_queue_size = max_queue_size
+        self.stop_flag = False
+        self.frame_count = 0
+        
+    def run(self):
+        cap = cv2.VideoCapture(self.video_path)
+        if not cap.isOpened():
+            self.output_queue.put(None)
+            return
+        
+        while not self.stop_flag:
+            ret, frame = cap.read()
+            if not ret:
+                self.output_queue.put(None)
+                break
+            
+            # Don't block if queue is full
+            try:
+                self.output_queue.put(frame, timeout=0.1)
+                self.frame_count += 1
+            except queue.Full:
+                pass
+        
+        cap.release()
+
+
+class FrameWriter(threading.Thread):
+    """Background thread that writes frames to output video."""
+    def __init__(self, output_path, fps, width, height, input_queue):
+        super().__init__(daemon=True)
+        self.output_path = output_path
+        self.fps = fps
+        self.width = width
+        self.height = height
+        self.input_queue = input_queue
+        self.stop_flag = False
+        self.frame_count = 0
+        
+    def run(self):
+        os.makedirs(os.path.dirname(self.output_path) or '.', exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(self.output_path, fourcc, self.fps, (self.width, self.height))
+        
+        while not self.stop_flag:
+            try:
+                frame = self.input_queue.get(timeout=1.0)
+                if frame is None:
+                    break
+                writer.write(frame)
+                self.frame_count += 1
+            except queue.Empty:
+                pass
+        
+        writer.release()
 
 
 def main():
@@ -51,16 +118,9 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps <= 1:
         fps = 25
+    cap.release()
 
     print(f'[INFO] Video loaded: {width}x{height} @ {fps:.2f} FPS')
-
-    # ---- Output writer ----
-    writer = None
-    if args.output:
-        os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(args.output, fourcc, fps, (width, height))
-        print(f'[INFO] Writing output to: {args.output}')
 
     # ---- Initialize filter engine ----
     engine = FilterEngine(threshold=args.threshold)
@@ -71,60 +131,85 @@ def main():
     last_output = None
     t0 = time.time()
 
+    # ---- Setup I/O threading ----
+    frame_queue = queue.Queue(maxsize=130)
+    output_queue = queue.Queue(maxsize=130)
+    
+    reader = FrameReader(args.video, frame_queue)
+    writer = None
+    if args.output:
+        writer = FrameWriter(args.output, fps, width, height, output_queue)
+        writer.start()
+        print(f'[INFO] Writing output to: {args.output}')
+    
+    reader.start()
+
     # ---- Main loop ----
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    try:
+        while True:
+            try:
+                frame = frame_queue.get(timeout=2.0)
+            except queue.Empty:
+                break
+            
+            if frame is None:
+                break
 
-        frame_idx += 1
+            frame_idx += 1
 
-        # --- Skip frames (HUGE FPS WIN) ---
-        if frame_idx % args.skip == 0:
-            last_output = engine.process_frame(frame, debug=args.debug)
-            processed_frames += 1
-        else:
-            # Reuse last processed frame
-            if last_output is not None:
-                last_output = last_output
+            # --- Skip frames (HUGE FPS WIN) ---
+            if frame_idx % args.skip == 0:
+                last_output = engine.process_frame(frame, debug=args.debug)
+                processed_frames += 1
             else:
-                last_output = frame
+                # Reuse last processed frame
+                if last_output is None:
+                    last_output = frame
 
-        display = last_output
+            display = last_output
 
-        # --- Display scaling (UI only) ---
-        if args.display_scale != 1.0:
-            display = cv2.resize(
-                display,
-                (int(width * args.display_scale), int(height * args.display_scale))
-            )
+            # --- Display scaling (UI only) ---
+            if args.display_scale != 1.0:
+                display = cv2.resize(
+                    display,
+                    (int(width * args.display_scale), int(height * args.display_scale))
+                )
 
-        try:
-            elapsed = time.time() -t0
-            fps_display = processed_frames / max(1e-6, elapsed)
-            cv2.putText(display, f'FPS: {fps_display:.2f}', (10,30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
-        except Exception:
-            pass
+            try:
+                elapsed = time.time() - t0
+                fps_display = processed_frames / max(1e-6, elapsed)
+                cv2.putText(display, f'FPS: {fps_display:.2f}', (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+            except Exception:
+                pass
 
-        cv2.imshow('FaceBlur - Video', display)
+            cv2.imshow('FaceBlur - Video', display)
+
+            if writer is not None and last_output is not None:
+                try:
+                    output_queue.put_nowait(last_output)
+                except queue.Full:
+                    pass
+
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+    finally:
+        reader.stop_flag = True
+        reader.join(timeout=5)
 
         if writer is not None:
-            writer.write(last_output)
+            try:
+                output_queue.put(None, timeout=1.0)
+            except queue.Full:
+                writer.stop_flag = True
+            writer.join(timeout=10)
 
-        if cv2.waitKey(1) & 0xFF == 27:
-            break
+        cv2.destroyAllWindows()
 
-    # ---- Cleanup ----
-    cap.release()
-    if writer is not None:
-        writer.release()
-    cv2.destroyAllWindows()
-
-    elapsed = time.time() - t0
-    print(f'[INFO] Frames read: {frame_idx}')
-    print(f'[INFO] Frames processed: {processed_frames}')
-    print(f'[INFO] Effective processing FPS: {processed_frames / elapsed:.2f}')
+        elapsed = time.time() - t0
+        print(f'[INFO] Frames read: {frame_idx}')
+        print(f'[INFO] Frames processed: {processed_frames}')
+        print(f'[INFO] Effective processing FPS: {processed_frames / elapsed:.2f}')
 
 
 if __name__ == '__main__':
