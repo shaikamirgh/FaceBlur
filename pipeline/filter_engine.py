@@ -78,8 +78,8 @@ class FilterEngine:
         h, w = frame_bgr.shape[:2]
         scale = self.detect_scale
 
-        # --- Detection Caching: Run detection every Nth frame ---
-        if self.frame_idx % self.detection_interval == 0:
+        # --- Detection Caching: Run detection on first frame, then every Nth frame ---
+        if self.frame_idx == 1 or self.frame_idx % self.detection_interval == 0:
             small = cv2.resize(frame_bgr, (int(w * scale), int(h * scale)))
             detections = self.detector.detect(small)
             
@@ -95,7 +95,7 @@ class FilterEngine:
             
             self.last_detections = detections
         else:
-            detections = self.last_detections
+            detections = []
 
         tracks = self.tracker.update(detections)
         output = frame_bgr.copy()
