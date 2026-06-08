@@ -162,7 +162,6 @@ def main():
                 last_output = engine.process_frame(frame, debug=args.debug)
                 processed_frames += 1
             else:
-            else:
                 # Reuse last processed frame
                 if last_output is None:
                     last_output = frame
