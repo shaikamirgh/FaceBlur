@@ -46,7 +46,6 @@ class FilterEngine:
 
         self.master_embedding = None
         self.frame_idx = 0
-        self.last_detections = []
 
     # --------------------------------------------------
     # Master setup
@@ -93,7 +92,6 @@ class FilterEngine:
                 if det['kps'] is not None:
                     det['kps'] = (det['kps'] / scale).astype(int)
             
-            self.last_detections = detections
         else:
             detections = []
 
