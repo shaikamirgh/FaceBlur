@@ -29,7 +29,8 @@ from insightface.app import FaceAnalysis
 class FaceRecognizer:
     def __init__(self, providers=None):
         if providers is None:
-            providers = ['CPUExecutionProvider']
+            # GPU-first strategy: try CUDA, fall back to CPU
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
 
         # IMPORTANT:
         # We use FaceAnalysis ONLY to load the ArcFace recognition model.
